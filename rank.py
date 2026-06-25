@@ -1,45 +1,3 @@
-#!/usr/bin/env python3
-"""
-Redrob Hackathon — Candidate Ranker
-Ranks candidates for the "Senior AI Engineer — Founding Team" JD at Redrob AI.
-
-Design: pure feature-based scoring, no LLM calls, no GPU. Runs on CPU in
-well under the 5-minute / 16GB budget on the full 100K candidate pool.
-
-Usage:
-    python rank.py --candidates ./candidates.jsonl --out ./submission.csv
-    python rank.py --candidates ./candidates.jsonl.gz --out ./submission.csv
-
-Pipeline:
-  1. Stream-parse candidates.jsonl (handles plain or .gz).
-  2. For each candidate, compute interpretable sub-scores:
-       - title_relevance      : how core is their current title to AI/ML/IR?
-       - career_substance     : do career_history descriptions show real
-                                 production ranking/retrieval/ML work (regex
-                                 over free text, not just a skills list)?
-       - skills_quality       : skills list quality, with a trust discount
-                                 for "keyword stuffing" (many AI skills with
-                                 near-zero duration/endorsements)
-       - experience_fit       : years_of_experience vs the JD's 5-9y band
-       - education_signal     : tier of institution (minor signal only)
-       - disqualifier_penalty : explicit JD disqualifiers (pure research-only,
-                                 consulting-only career, no NLP/IR exposure,
-                                 stale recent-only LangChain-wrapper experience)
-       - behavioral_modifier  : multiplicative modifier from redrob_signals
-                                 (recency of activity, recruiter response
-                                 rate, notice period, verification, etc.)
-       - honeypot_flag        : internal-consistency checks; if any fire,
-                                 the candidate is hard-capped near zero.
-  3. Combine into one composite score, keep a running top-K (heap) so we
-     never hold all 100K scores in memory at once.
-  4. Emit the top 100 as the required CSV, each with a short reasoning
-     string built from the same features that drove the score (so the
-     reasoning is always truthful, never hallucinated).
-
-This is intentionally a transparent, rule-based scorer (not a black box)
-because the brief explicitly rewards systems that can be explained, defended
-in an interview, and reproduced from a single command in a Docker sandbox.
-"""
 
 import argparse
 import csv
@@ -50,13 +8,7 @@ import re
 import sys
 from datetime import date, datetime
 
-# ----------------------------------------------------------------------
-# 1. Static reference data
-# ----------------------------------------------------------------------
-
-# Title relevance tiers for the Senior AI Engineer / ranking-and-retrieval role.
-# Matched against current_title and career_history titles (case-insensitive).
-TITLE_TIER_3 = {  # bullseye: exactly the kind of role the JD wants
+TITLE_TIER_3 = { 
     "ai engineer", "senior ai engineer", "lead ai engineer", "staff ai engineer",
     "machine learning engineer", "senior machine learning engineer",
     "staff machine learning engineer", "ml engineer", "senior ml engineer",
@@ -65,41 +17,29 @@ TITLE_TIER_3 = {  # bullseye: exactly the kind of role the JD wants
     "recommendation systems engineer", "ranking engineer",
     "information retrieval engineer", "ai research engineer",
 }
-TITLE_TIER_2 = {  # adjacent and plausible, but needs corroboration
+TITLE_TIER_2 = { 
     "data scientist", "senior data scientist", "computer vision engineer",
     "ai specialist", "junior ml engineer", "research engineer",
     "senior software engineer (ml)", "ml ops engineer", "mlops engineer",
 }
-TITLE_TIER_1 = {  # general SWE/data roles: possible but needs strong evidence
+TITLE_TIER_1 = {  
     "software engineer", "senior software engineer", "data engineer",
     "senior data engineer", "analytics engineer", "data analyst",
     "backend engineer", "full stack developer",
 }
-# Everything else (Business Analyst, HR Manager, Accountant, Civil Engineer,
-# Graphic Designer, Marketing Manager, Customer Support, ...) defaults to
-# tier 0: essentially irrelevant regardless of how many AI keywords appear
-# in their skills list. This is the main defense against the keyword-
-# stuffer trap the JD explicitly calls out.
 
-# Pure-research/academic-only titles -> hard disqualifier trigger if it's
-# the *entire* visible career (JD: "pure research environments... we will
-# not move forward").
 RESEARCH_ONLY_TITLES = {
     "research scientist", "research fellow", "postdoctoral researcher",
     "phd researcher", "research assistant", "academic researcher",
 }
 
-# Consulting/services-only firms named explicitly in the JD as a soft
-# disqualifier when they are the *entire* career.
+
 CONSULTING_FIRMS = {
     "tcs", "tata consultancy services", "infosys", "wipro", "accenture",
     "cognizant", "capgemini",
 }
 
-# Regex signals of real production ranking/retrieval/ML substance in free
-# text (career_history descriptions, summary). These are the things a
-# keyword-stuffed skills list cannot fake, because they require coherent
-# sentences about *what was built and shipped*.
+
 PROD_SUBSTANCE_PATTERNS = [
     r"\bembedding", r"\bretrieval\b", r"\bsentence[- ]transformers?\b",
     r"\bfaiss\b", r"\bpinecone\b", r"\bweaviate\b", r"\bqdrant\b",
@@ -115,10 +55,6 @@ PROD_SUBSTANCE_PATTERNS = [
 ]
 PROD_SUBSTANCE_RE = re.compile("|".join(PROD_SUBSTANCE_PATTERNS), re.IGNORECASE)
 
-# Signals of "recent LangChain-wrapper-only" experience: heavy on calling
-# hosted LLM APIs through a framework, light on systems substance. The JD
-# treats this as a soft disqualifier *unless* paired with older production
-# ML experience.
 WRAPPER_ONLY_PATTERNS = re.compile(
     r"\blangchain\b|\bcalled? (openai|gpt|chatgpt) api\b|\bprompt engineering\b|\bbuilt a chatbot\b",
     re.IGNORECASE,
@@ -148,12 +84,7 @@ CORE_AI_SKILL_NAMES = {
     "bge", "e5", "haystack", "kubeflow", "mlflow",
 }
 
-TODAY = date(2026, 6, 16)  # current date per the operating context
-
-
-# ----------------------------------------------------------------------
-# 2. Helpers
-# ----------------------------------------------------------------------
+TODAY = date.today()
 
 def parse_date(s):
     if not s:
@@ -203,26 +134,18 @@ def honeypot_checks(cand):
     career_history = cand.get("career_history", [])
     skills = cand.get("skills", [])
 
-    # Check 1: expert proficiency claimed with ~0 months of usage.
+   
     for s in skills:
         if s.get("proficiency") == "expert" and s.get("duration_months", 0) <= 1:
             return True
 
-    # Check 2: total career_history duration far exceeds stated years_of_experience.
+    
     yoe_months = profile.get("years_of_experience", 0) * 12
     total_months = sum(j.get("duration_months", 0) for j in career_history)
     if total_months > yoe_months * 1.5 + 6:
         return True
 
-    # NOTE: a "single skill duration_months exceeds total YOE" check was
-    # tried but rejected — it fired on ~13% of the *entire* dataset, which
-    # is clearly synthetic-generation noise (skill duration isn't tightly
-    # coupled to total experience in this dataset) rather than a
-    # deliberate honeypot signal. Keeping only checks that are rare and
-    # specific avoids false-positiving on genuinely good candidates.
 
-    # Check 3: overlapping employment intervals (can't work two full-time
-    # jobs with overlapping date ranges in this synthetic dataset's model).
     intervals = []
     for j in career_history:
         st = parse_date(j.get("start_date"))
@@ -249,23 +172,21 @@ def compute_skills_quality(skills):
             endorse = s.get("endorsements", 0)
             prof = s.get("proficiency", "beginner")
             prof_w = {"beginner": 0.25, "intermediate": 0.5, "advanced": 0.8, "expert": 1.0}.get(prof, 0.25)
-            # Trust discount: a claimed skill with near-zero duration and
-            # zero endorsements is exactly the keyword-stuffer signature.
+            
             trust = min(1.0, (dur / 12.0)) * 0.7 + min(1.0, endorse / 10.0) * 0.3
-            trust = max(trust, 0.1)  # never fully zero out, just discount
+            trust = max(trust, 0.1)  
             core_hits.append(prof_w * trust)
     n_core = len(core_hits)
     if n_core == 0:
         return 0.0, 0
-    # Average quality of core AI skills, with a mild bonus for breadth
-    # (more genuinely-substantiated core skills), capped.
+    
     avg_quality = sum(core_hits) / n_core
     breadth_bonus = min(0.3, 0.04 * n_core)
     return min(1.0, avg_quality + breadth_bonus), n_core
 
 
 def compute_experience_fit(yoe):
-    # JD band is 5-9 years, soft on the edges.
+   
     if 5 <= yoe <= 9:
         return 1.0
     if 3 <= yoe < 5:
@@ -294,7 +215,7 @@ def compute_behavioral_modifier(sig):
             mod *= 0.92
 
     resp_rate = sig.get("recruiter_response_rate", 0.5)
-    mod *= 0.55 + 0.65 * resp_rate  # 0.55 at 0%, 1.20 at 100%
+    mod *= 0.55 + 0.65 * resp_rate 
 
     if not sig.get("open_to_work_flag", True):
         mod *= 0.6
@@ -315,11 +236,7 @@ def compute_behavioral_modifier(sig):
     if sig.get("verified_email") and sig.get("verified_phone"):
         mod *= 1.03
 
-    # Cap at 1.0: strong availability should never inflate a candidate
-    # above their substantive on-paper fit, only poor availability should
-    # pull them down. This also keeps the final composite score naturally
-    # bounded in [0, 1] without needing a post-hoc clamp that would
-    # collapse distinct top candidates into ties.
+    
     return max(0.35, min(1.0, mod))
 
 
@@ -329,16 +246,13 @@ def compute_disqualifier_penalty(cand, text_blob, career_history):
     profile = cand["profile"]
 
     if is_research_only(profile, career_history):
-        penalty *= 0.05  # near-total disqualifier per JD
+        penalty *= 0.05  
 
     if is_consulting_only(career_history) and len(career_history) <= 2:
-        penalty *= 0.5  # soft disqualifier, JD says case-by-case
-
+        penalty *= 0.5 
     if CV_SPEECH_ROBOTICS_PATTERNS.search(text_blob) and not NLP_IR_PATTERNS.search(text_blob):
-        penalty *= 0.35  # CV/speech/robotics with no NLP/IR exposure
-
-    # Recent-only LangChain/API-wrapper experience without older
-    # substantial production ML history.
+        penalty *= 0.35  
+        
     has_wrapper_only_signal = bool(WRAPPER_ONLY_PATTERNS.search(text_blob))
     has_real_substance = bool(PROD_SUBSTANCE_RE.search(text_blob))
     yoe = profile.get("years_of_experience", 0)
@@ -386,10 +300,7 @@ def score_candidate(cand):
     else:
         loc_score = 0.2
 
-    # Weighted composite of the "on-paper fit" components. Weights sum to
-    # 0.975, not 1.0 — the remaining 0.025 of headroom is reserved for the
-    # tie_bonus below so that candidates who max out every main component
-    # can still be differentiated rather than all landing on a hard 1.0.
+    
     base = (
         0.332 * t_score +
         0.254 * substance_score +
@@ -399,11 +310,7 @@ def score_candidate(cand):
         0.078 * loc_score
     )
 
-    # Small uncapped tie-breaking bonus: among candidates who all hit the
-    # substance/skills caps, reward genuinely deeper evidence (more
-    # substance mentions, more substantiated core skills, more
-    # endorsements) rather than letting them tie. Kept small so it can
-    # only break ties, never override the main weighted components.
+   
     tie_bonus = (
         0.01 * min(1.0, substance_hits / 20.0) +
         0.01 * min(1.0, n_core_skills / 15.0) +
@@ -453,9 +360,7 @@ def build_reasoning(cand, feats, rank):
     company = feats["company"]
     location = feats["location"]
 
-    # Pull 1-2 concrete, real skill names (only ones actually on the
-    # candidate's skill list) to anchor the sentence in specifics rather
-    # than generic praise.
+   
     skill_names = [s.get("name", "") for s in cand.get("skills", [])
                    if s.get("name", "").strip().lower() in CORE_AI_SKILL_NAMES]
     top_skills = ", ".join(skill_names[:3]) if skill_names else None
@@ -465,8 +370,7 @@ def build_reasoning(cand, feats, rank):
         opener_parts.append(f"based in {location}")
     opener = "; ".join(opener_parts) + "."
 
-    # Tier-dependent framing so language genuinely differs by rank band,
-    # not just by swapping the name in a fixed sentence.
+    
     if feats["t_score"] >= 1.0 and feats["substance_hits"] >= 3:
         fit_clause = "Title and career narrative both point directly at ranking/retrieval/ML systems work, which is the core of this JD."
     elif feats["t_score"] >= 1.0:
@@ -504,9 +408,7 @@ def build_reasoning(cand, feats, rank):
     return text
 
 
-# ----------------------------------------------------------------------
-# 3. Streaming top-K selection
-# ----------------------------------------------------------------------
+
 
 def open_candidates_file(path):
     if path.endswith(".gz"):
@@ -515,7 +417,7 @@ def open_candidates_file(path):
 
 
 def run(candidates_path, out_path, top_k=100):
-    heap = []  # min-heap of (score, candidate_id, cand_dict, feats)
+    heap = []  
     counter = 0
     honeypots_seen = 0
 
@@ -529,7 +431,7 @@ def run(candidates_path, out_path, top_k=100):
             counter += 1
             if feats.get("honeypot"):
                 honeypots_seen += 1
-                continue  # never eligible for top-K
+                continue  
 
             entry = (score, cand["candidate_id"], cand, feats)
             if len(heap) < top_k:
@@ -539,10 +441,7 @@ def run(candidates_path, out_path, top_k=100):
 
     print(f"Processed {counter} candidates; {honeypots_seen} honeypots excluded.", file=sys.stderr)
 
-    # Round first, then sort, so the tie-break on candidate_id ascending
-    # is applied to the *displayed* score (matches what the validator
-    # checks) and not to floating-point noise below 2 decimal places.
-    # Output scale: 0-100 (percentage-style fit score), not 0-1.
+    
     rounded = [
         (round(max(score, 0.0001) * 100, 2), cid, cand, feats)
         for (score, cid, cand, feats) in heap
